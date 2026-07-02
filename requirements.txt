@@ -1,0 +1,5 @@
+Telethon==1.33.1
+qrcode
+gTTS
+Pillow
+deep-translator
