@@ -35,7 +35,7 @@ PORT         = int(os.environ.get("PORT", 8080))
 
 start_time   = time.time()
 SESSIONS     = {}   
-LOGIN_STATES = {}  # সেশন তৈরির স্টেট ট্র্যাকিং করার জন্য
+LOGIN_STATES = {}  
 AFK_COOLDOWN = 3600  
 
 def load_db():
@@ -43,12 +43,14 @@ def load_db():
         try:
             with open(DB_FILE) as f: return json.load(f)
         except: pass
-    return {"settings": {}}
+    return {"settings": {}, "saved_sessions": []}
 
 def save_db():
     with open(DB_FILE, "w") as f: json.dump(db, f, indent=2)
 
 db = load_db()
+if "saved_sessions" not in db:
+    db["saved_sessions"] = []
 
 def uptime():
     s = int(time.time() - start_time)
@@ -72,204 +74,8 @@ async def start_dummy_server():
     except Exception as e:
         logger.error(f"🔴 Failed to start dummy server: {e}")
 
-# ── BOT INLINE MENUS ──────────────────────────────────────────────────────────
-def main_menu_buttons():
-    buttons = []
-    for uid, data in SESSIONS.items():
-        name = data["me"].first_name
-        afk_icon = "💤" if data["afk"] else "🟢"
-        buttons.append([Button.inline(f"{afk_icon} {name}", data=f"acc_{uid}")])
-    
-    # নতুন অ্যাকাউন্ট অ্যাড করার বাটন
-    buttons.append([Button.inline("➕ Add New Account", data="add_acc")])
-    buttons.append([Button.inline("📊 Stats", data="stats"), Button.inline("🔄 Refresh", data="refresh")])
-    return buttons
-
-def account_menu_buttons(uid):
-    data = SESSIONS[uid]
-    afk_status = "ON ✅" if data["afk"] else "OFF ❌"
-    return [
-        [Button.inline(f"💤 AFK: {afk_status}", data=f"toggle_afk_{uid}")],
-        [Button.inline("📝 Change Bio", data=f"set_bio_{uid}"),
-         Button.inline("✏️ Change Name", data=f"set_name_{uid}")],
-        [Button.inline("🗑 Remove Photo", data=f"delpfp_{uid}"),
-         Button.inline("📋 My Info", data=f"myinfo_{uid}")],
-        [Button.inline("⏱ Auto-Delete Settings", data=f"autodel_{uid}")],
-        [Button.inline("◀️ Back", data="main")]
-    ]
-
-def autodel_menu_buttons(uid):
-    s = db["settings"].get(str(uid), {})
-    delay = s.get("autodel_delay", 60)
-    enabled = s.get("autodel_enabled", False)
-    status = f"ON ({delay}s)" if enabled else "OFF"
-    return [
-        [Button.inline(f"Auto-Delete: {status}", data=f"autodel_toggle_{uid}")],
-        [Button.inline("Set 30s",  data=f"autodel_set_{uid}_30"),
-         Button.inline("Set 60s",  data=f"autodel_set_{uid}_60"),
-         Button.inline("Set 300s", data=f"autodel_set_{uid}_300")],
-        [Button.inline("◀️ Back", data=f"acc_{uid}")]
-    ]
-
-# ── MASTER BOT HANDLERS ───────────────────────────────────────────────────────
-@bot.on(events.NewMessage(pattern='/start'))
-async def _(e):
-    if e.sender_id != OWNER_ID: return
-    LOGIN_STATES.pop(OWNER_ID, None)
-    await e.reply("**Session Manager**\n\nSelect an account to manage or add a new one:", buttons=main_menu_buttons())
-
-@bot.on(events.CallbackQuery)
-async def _(e):
-    if e.sender_id != OWNER_ID: return await e.answer("Access denied.", alert=True)
-    data = e.data.decode()
-
-    if data == "main":
-        LOGIN_STATES.pop(OWNER_ID, None)
-        await e.edit("**Session Manager**\n\nSelect an account to manage:", buttons=main_menu_buttons())
-    elif data == "refresh":
-        await e.edit("**Session Manager** _(refreshed)_\n\nSelect an account:", buttons=main_menu_buttons())
-    elif data == "add_acc":
-        LOGIN_STATES[OWNER_ID] = {"step": "phone"}
-        await e.edit("📱 তোমার টেলিগ্রাম নাম্বারটি আন্তর্জাতিক ফরম্যাটে দাও (যেমন: `+88017XXXXXXXX`):", buttons=[[Button.inline("◀️ Cancel", data="main")]])
-    elif data == "stats":
-        total  = len(SESSIONS)
-        online = sum(1 for d in SESSIONS.values() if not d["afk"])
-        afk    = total - online
-        await e.edit(f"**Stats**\n\nTotal Sessions: `{total}`\nOnline: `{online}`\nAFK: `{afk}`\nUptime: `{uptime()}`", buttons=[[Button.inline("◀️ Back", data="main")]])
-    elif data.startswith("acc_"):
-        uid = int(data[4:])
-        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
-        d = SESSIONS[uid]; me = d["me"]
-        await e.edit(f"**Managing: {me.first_name}**\nID: `{uid}`\nUsername: @{me.username or '—'}\nAFK: {'ON' if d['afk'] else 'OFF'}\nAFK Message: `{d['afk_msg']}`", buttons=account_menu_buttons(uid))
-    elif data.startswith("toggle_afk_"):
-        uid = int(data[11:])
-        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
-        SESSIONS[uid]["afk"] = not SESSIONS[uid]["afk"]
-        await e.answer(f"AFK {'enabled' if SESSIONS[uid]['afk'] else 'disabled'}.")
-        d = SESSIONS[uid]; me = d["me"]
-        await e.edit(f"**Managing: {me.first_name}**\nID: `{uid}`\nAFK: {'ON ✅' if d['afk'] else 'OFF ❌'}", buttons=account_menu_buttons(uid))
-    elif data.startswith("delpfp_"):
-        uid = int(data[7:])
-        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
-        try:
-            p = await SESSIONS[uid]["client"].get_profile_photos("me")
-            if p:
-                await SESSIONS[uid]["client"].delete_profile_photos(p[0])
-                await e.answer("Profile photo removed.")
-            else: await e.answer("No photo to remove.", alert=True)
-        except Exception as ex: 
-            logger.error(f"Error removing photo: {ex}")
-            await e.answer(f"Error: {ex}", alert=True)
-    elif data.startswith("myinfo_"):
-        uid = int(data[7:])
-        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
-        me = SESSIONS[uid]["me"]
-        await e.edit(f"**Info: {me.first_name}**\n\nID: `{uid}`\nUsername: @{me.username or '—'}\nFirst Name: {me.first_name}\nLast Name: {me.last_name or '—'}", buttons=[[Button.inline("◀️ Back", data=f"acc_{uid}")]])
-    elif data.startswith("autodel_") and not data.startswith("autodel_set_") and not data.startswith("autodel_toggle_"):
-        uid = int(data[8:])
-        await e.edit("**Auto-Delete Settings**\nChoose delay for public command responses:", buttons=autodel_menu_buttons(uid))
-    elif data.startswith("autodel_toggle_"):
-        uid = int(data[15:])
-        s = db["settings"].setdefault(str(uid), {})
-        s["autodel_enabled"] = not s.get("autodel_enabled", False)
-        save_db()
-        await e.answer(f"Auto-delete {'enabled' if s['autodel_enabled'] else 'disabled'}.")
-        await e.edit("**Auto-Delete Settings:**", buttons=autodel_menu_buttons(uid))
-    elif data.startswith("autodel_set_"):
-        parts = data.split("_")
-        uid, delay = int(parts[2]), int(parts[3])
-        s = db["settings"].setdefault(str(uid), {})
-        s["autodel_delay"]   = delay
-        s["autodel_enabled"] = True
-        save_db()
-        await e.answer(f"Auto-delete set to {delay}s.")
-        await e.edit("**Auto-Delete Settings:**", buttons=autodel_menu_buttons(uid))
-    elif data.startswith("set_bio_"):
-        SESSIONS[int(data[8:])]["_waiting"] = "bio"
-        await e.edit("Send the new bio as a message now:", buttons=[[Button.inline("◀️ Cancel", data=f"acc_{int(data[8:])}")]])
-    elif data.startswith("set_name_"):
-        SESSIONS[int(data[9:])]["_waiting"] = "name"
-        await e.edit("Send the new first name as a message now:", buttons=[[Button.inline("◀️ Cancel", data=f"acc_{int(data[9:])}")]])
-
-# ── LOGIN AND PROFILE HANDLER ─────────────────────────────────────────────────
-@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.text and not e.text.startswith('/')))
-async def handle_owner_input(e):
-    state = LOGIN_STATES.get(OWNER_ID)
-    
-    # সেশন ক্রিয়েশন উইজার্ড লজিক
-    if state:
-        step = state.get("step")
-        if step == "phone":
-            phone = e.text.strip().replace(" ", "")
-            m = await e.reply("`OTP কোড পাঠানো হচ্ছে...`")
-            try:
-                cl = TelegramClient(StringSession(), API_ID, API_HASH)
-                await cl.connect()
-                res = await cl.send_code_request(phone)
-                LOGIN_STATES[OWNER_ID] = {
-                    "step": "otp",
-                    "phone": phone,
-                    "phone_code_hash": res.phone_code_hash,
-                    "client": cl
-                }
-                await m.edit("📩 তোমার টেলিগ্রাম অ্যাপে বা সিমে পাঠানো ওটিপি (OTP) কোডটি দাও।\n\nযদি কোডের মাঝে স্পেস থাকে, তবে স্পেস যেভাবে আছে সেভাবেই লিখে দাও (যেমন: `1 2 3 4 5`):")
-            except Exception as ex:
-                await m.edit(f"❌ এরর এসেছে: `{ex}`")
-                LOGIN_STATES.pop(OWNER_ID, None)
-            return
-
-        elif step == "otp":
-            otp = e.text.strip().replace(" ", "")
-            cl = state["client"]
-            phone = state["phone"]
-            hsh = state["phone_code_hash"]
-            m = await e.reply("`OTP ভেরিফাই করা হচ্ছে...`")
-            try:
-                await cl.sign_in(phone, otp, phone_code_hash=hsh)
-                str_session = cl.session.save()
-                await m.edit(f"✅ **লগইন সফল হয়েছে!**\n\nনিচের সেশন কোডটি সম্পূর্ণ কপি করে তোমার Render-এর `STRING_SESSIONS` এনভায়রনমেন্ট ভেরিয়েবলে যোগ করো (একাধিক সেশন হলে কমা `,` দিয়ে আলাদা করবে):\n\n`{str_session}`\n\n_রেন্ডার ড্যাশবোর্ডে ভেরিয়েবল সেভ করার পর অবশ্যই একবার Manual Deploy/Redeploy দিবে।_")
-                LOGIN_STATES.pop(OWNER_ID, None)
-                await cl.disconnect()
-            except SessionPasswordNeededError:
-                LOGIN_STATES[OWNER_ID]["step"] = "2fa"
-                await m.edit("🔒 তোমার অ্যাকাউন্টে Two-Step Verification অন আছে। দয়া করে 2FA পাসওয়ার্ডটি লিখে পাঠাও:")
-            except Exception as ex:
-                await m.edit(f"❌ লগইন ব্যর্থ হয়েছে: `{ex}`")
-                LOGIN_STATES.pop(OWNER_ID, None)
-            return
-
-        elif step == "2fa":
-            pwd = e.text.strip()
-            cl = state["client"]
-            m = await e.reply("`2FA পাসওয়ার্ড ভেরিফাই করা হচ্ছে...`")
-            try:
-                await cl.sign_in(password=pwd)
-                str_session = cl.session.save()
-                await m.edit(f"✅ **লগইন সফল হয়েছে (2FA)!**\n\nনিচের সেশন কোডটি কপি করে তোমার Render-এর `STRING_SESSIONS` এ যোগ করো:\n\n`{str_session}`\n\n_রেন্ডারে সেভ করার পর রিডিপ্লয় দাও।_")
-                LOGIN_STATES.pop(OWNER_ID, None)
-                await cl.disconnect()
-            except Exception as ex:
-                await m.edit(f"❌ পাসওয়ার্ড ভুল বা অন্য সমস্যা: `{ex}`")
-                LOGIN_STATES.pop(OWNER_ID, None)
-            return
-
-    # বায়ো এবং নাম পরিবর্তনের এক্সিস্টিং লজিক
-    for uid, data in SESSIONS.items():
-        waiting = data.get("_waiting")
-        if not waiting: continue
-        try:
-            if waiting == "bio":
-                await data["client"](UpdateProfileRequest(about=e.text.strip()))
-                await e.reply(f"Bio updated for **{data['me'].first_name}**.")
-            elif waiting == "name":
-                await data["client"](UpdateProfileRequest(first_name=e.text.strip()))
-                await e.reply(f"Name updated for **{data['me'].first_name}**.")
-        except Exception as ex: 
-            logger.error(f"Profile update error: {ex}")
-            await e.reply(f"Error: {ex}")
-        data.pop("_waiting", None); break
-
 # ── USERBOTS HANDLER ENGINE ───────────────────────────────────────────────────
+# (লগইন সফল হওয়ার সাথে সাথে এটি কল হবে)
 def register_userbot_handlers(client, uid):
     
     def is_owner(e):
@@ -489,32 +295,269 @@ def register_userbot_handlers(client, uid):
         except: 
             m = await e.reply("Invalid expression."); asyncio.create_task(auto_del(m, 10))
 
+# ── BOT INLINE MENUS ──────────────────────────────────────────────────────────
+def main_menu_buttons():
+    buttons = []
+    for uid, data in SESSIONS.items():
+        name = data["me"].first_name
+        afk_icon = "💤" if data["afk"] else "🟢"
+        buttons.append([Button.inline(f"{afk_icon} {name}", data=f"acc_{uid}")])
+    
+    buttons.append([Button.inline("➕ Add New Account", data="add_acc")])
+    buttons.append([Button.inline("📊 Stats", data="stats"), Button.inline("🔄 Refresh", data="refresh")])
+    return buttons
+
+def account_menu_buttons(uid):
+    data = SESSIONS[uid]
+    afk_status = "ON ✅" if data["afk"] else "OFF ❌"
+    return [
+        [Button.inline(f"💤 AFK: {afk_status}", data=f"toggle_afk_{uid}")],
+        [Button.inline("📝 Change Bio", data=f"set_bio_{uid}"),
+         Button.inline("✏️ Change Name", data=f"set_name_{uid}")],
+        [Button.inline("🗑 Remove Photo", data=f"delpfp_{uid}"),
+         Button.inline("📋 My Info", data=f"myinfo_{uid}")],
+        [Button.inline("⏱ Auto-Delete Settings", data=f"autodel_{uid}")],
+        [Button.inline("◀️ Back", data="main")]
+    ]
+
+def autodel_menu_buttons(uid):
+    s = db["settings"].get(str(uid), {})
+    delay = s.get("autodel_delay", 60)
+    enabled = s.get("autodel_enabled", False)
+    status = f"ON ({delay}s)" if enabled else "OFF"
+    return [
+        [Button.inline(f"Auto-Delete: {status}", data=f"autodel_toggle_{uid}")],
+        [Button.inline("Set 30s",  data=f"autodel_set_{uid}_30"),
+         Button.inline("Set 60s",  data=f"autodel_set_{uid}_60"),
+         Button.inline("Set 300s", data=f"autodel_set_{uid}_300")],
+        [Button.inline("◀️ Back", data=f"acc_{uid}")]
+    ]
+
+# ── MASTER BOT HANDLERS ───────────────────────────────────────────────────────
+@bot.on(events.NewMessage(pattern='/start'))
+async def _(e):
+    if e.sender_id != OWNER_ID: return
+    LOGIN_STATES.pop(OWNER_ID, None)
+    await e.reply("**Session Manager**\n\nSelect an account to manage or add a new one:", buttons=main_menu_buttons())
+
+@bot.on(events.CallbackQuery)
+async def _(e):
+    if e.sender_id != OWNER_ID: return await e.answer("Access denied.", alert=True)
+    data = e.data.decode()
+
+    if data == "main":
+        LOGIN_STATES.pop(OWNER_ID, None)
+        await e.edit("**Session Manager**\n\nSelect an account to manage:", buttons=main_menu_buttons())
+    elif data == "refresh":
+        await e.edit("**Session Manager** _(refreshed)_\n\nSelect an account:", buttons=main_menu_buttons())
+    elif data == "add_acc":
+        LOGIN_STATES[OWNER_ID] = {"step": "phone"}
+        await e.edit("📱 তোমার টেলিগ্রাম নাম্বারটি আন্তর্জাতিক ফরম্যাটে দাও (যেমন: `+88017XXXXXXXX`):", buttons=[[Button.inline("◀️ Cancel", data="main")]])
+    elif data == "stats":
+        total  = len(SESSIONS)
+        online = sum(1 for d in SESSIONS.values() if not d["afk"])
+        afk    = total - online
+        await e.edit(f"**Stats**\n\nTotal Sessions: `{total}`\nOnline: `{online}`\nAFK: `{afk}`\nUptime: `{uptime()}`", buttons=[[Button.inline("◀️ Back", data="main")]])
+    elif data.startswith("acc_"):
+        uid = int(data[4:])
+        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
+        d = SESSIONS[uid]; me = d["me"]
+        await e.edit(f"**Managing: {me.first_name}**\nID: `{uid}`\nUsername: @{me.username or '—'}\nAFK: {'ON' if d['afk'] else 'OFF'}\nAFK Message: `{d['afk_msg']}`", buttons=account_menu_buttons(uid))
+    elif data.startswith("toggle_afk_"):
+        uid = int(data[11:])
+        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
+        SESSIONS[uid]["afk"] = not SESSIONS[uid]["afk"]
+        await e.answer(f"AFK {'enabled' if SESSIONS[uid]['afk'] else 'disabled'}.")
+        d = SESSIONS[uid]; me = d["me"]
+        await e.edit(f"**Managing: {me.first_name}**\nID: `{uid}`\nAFK: {'ON ✅' if d['afk'] else 'OFF ❌'}", buttons=account_menu_buttons(uid))
+    elif data.startswith("delpfp_"):
+        uid = int(data[7:])
+        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
+        try:
+            p = await SESSIONS[uid]["client"].get_profile_photos("me")
+            if p:
+                await SESSIONS[uid]["client"].delete_profile_photos(p[0])
+                await e.answer("Profile photo removed.")
+            else: await e.answer("No photo to remove.", alert=True)
+        except Exception as ex: 
+            logger.error(f"Error removing photo: {ex}")
+            await e.answer(f"Error: {ex}", alert=True)
+    elif data.startswith("myinfo_"):
+        uid = int(data[7:])
+        if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
+        me = SESSIONS[uid]["me"]
+        await e.edit(f"**Info: {me.first_name}**\n\nID: `{uid}`\nUsername: @{me.username or '—'}\nFirst Name: {me.first_name}\nLast Name: {me.last_name or '—'}", buttons=[[Button.inline("◀️ Back", data=f"acc_{uid}")]])
+    elif data.startswith("autodel_") and not data.startswith("autodel_set_") and not data.startswith("autodel_toggle_"):
+        uid = int(data[8:])
+        await e.edit("**Auto-Delete Settings**\nChoose delay for public command responses:", buttons=autodel_menu_buttons(uid))
+    elif data.startswith("autodel_toggle_"):
+        uid = int(data[15:])
+        s = db["settings"].setdefault(str(uid), {})
+        s["autodel_enabled"] = not s.get("autodel_enabled", False)
+        save_db()
+        await e.answer(f"Auto-delete {'enabled' if s['autodel_enabled'] else 'disabled'}.")
+        await e.edit("**Auto-Delete Settings:**", buttons=autodel_menu_buttons(uid))
+    elif data.startswith("autodel_set_"):
+        parts = data.split("_")
+        uid, delay = int(parts[2]), int(parts[3])
+        s = db["settings"].setdefault(str(uid), {})
+        s["autodel_delay"]   = delay
+        s["autodel_enabled"] = True
+        save_db()
+        await e.answer(f"Auto-delete set to {delay}s.")
+        await e.edit("**Auto-Delete Settings:**", buttons=autodel_menu_buttons(uid))
+    elif data.startswith("set_bio_"):
+        SESSIONS[int(data[8:])]["_waiting"] = "bio"
+        await e.edit("Send the new bio as a message now:", buttons=[[Button.inline("◀️ Cancel", data=f"acc_{int(data[8:])}")]])
+    elif data.startswith("set_name_"):
+        SESSIONS[int(data[9:])]["_waiting"] = "name"
+        await e.edit("Send the new first name as a message now:", buttons=[[Button.inline("◀️ Cancel", data=f"acc_{int(data[9:])}")]])
+
+# ── LOGIN AND RUNTIME INJECTION LOGIC ─────────────────────────────────────────
+@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.text and not e.text.startswith('/')))
+async def handle_owner_input(e):
+    state = LOGIN_STATES.get(OWNER_ID)
+    
+    if state:
+        step = state.get("step")
+        if step == "phone":
+            phone = e.text.strip().replace(" ", "")
+            m = await e.reply("`OTP কোড পাঠানো হচ্ছে...`")
+            try:
+                cl = TelegramClient(StringSession(), API_ID, API_HASH)
+                await cl.connect()
+                res = await cl.send_code_request(phone)
+                LOGIN_STATES[OWNER_ID] = {
+                    "step": "otp",
+                    "phone": phone,
+                    "phone_code_hash": res.phone_code_hash,
+                    "client": cl
+                }
+                await m.edit("📩 ওটিপি (OTP) কোডটি দাও। কোডের মাঝে স্পেস থাকলে সেভাবেই দাও (যেমন: `1 2 3 4 5`):")
+            except Exception as ex:
+                await m.edit(f"❌ এরর: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+        elif step == "otp":
+            otp = e.text.strip().replace(" ", "")
+            cl = state["client"]
+            phone = state["phone"]
+            hsh = state["phone_code_hash"]
+            m = await e.reply("`OTP ভেরিফাই করা হচ্ছে...`")
+            try:
+                await cl.sign_in(phone, otp, phone_code_hash=hsh)
+                
+                # সফল লগইন: মেমোরি ও লোকাল ফাইলে ডাইনামিক ইনজেকশন শুরু
+                me = await cl.get_me()
+                uid = me.id
+                str_session = cl.session.save()
+                
+                # ১. লোকাল ডাটাবেজে ব্যাকআপ নেওয়া
+                if str_session not in db["saved_sessions"]:
+                    db["saved_sessions"].append(str_session)
+                    save_db()
+                
+                # ২. সরাসরি রানিং বটের মেমোরিতে ঢুকিয়ে দেওয়া (ইনস্ট্যান্ট একটিভ)
+                SESSIONS[uid] = {
+                    "client":   cl,
+                    "me":       me,
+                    "afk":      True,
+                    "afk_msg":  "I'm away right now. I'll get back to you soon.",
+                    "afk_sent": {}
+                }
+                register_userbot_handlers(cl, uid)
+                
+                await m.edit(f"✅ **লগইন সফল এবং ইনস্ট্যান্ট একটিভ হয়েছে!**\n\nঅ্যাকাউন্ট: **{me.first_name}** (ID: `{uid}`)\nএখন এটি কোনো রিস্টার্ট ছাড়াই কাজ করবে।\n\n_ভবিষ্যতের সুরক্ষার জন্য সেশন কোডটি নিচে দেওয়া হলো:_ \n`{str_session}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            except SessionPasswordNeededError:
+                LOGIN_STATES[OWNER_ID]["step"] = "2fa"
+                await m.edit("🔒 2FA পাসওয়ার্ডটি লিখে পাঠাও:")
+            except Exception as ex:
+                await m.edit(f"❌ লগইন ব্যর্থ: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+        elif step == "2fa":
+            pwd = e.text.strip()
+            cl = state["client"]
+            m = await e.reply("`2FA পাসওয়ার্ড ভেরিফাই করা হচ্ছে...`")
+            try:
+                await cl.sign_in(password=pwd)
+                
+                me = await cl.get_me()
+                uid = me.id
+                str_session = cl.session.save()
+                
+                if str_session not in db["saved_sessions"]:
+                    db["saved_sessions"].append(str_session)
+                    save_db()
+                    
+                SESSIONS[uid] = {
+                    "client":   cl,
+                    "me":       me,
+                    "afk":      True,
+                    "afk_msg":  "I'm away right now. I'll get back to you soon.",
+                    "afk_sent": {}
+                }
+                register_userbot_handlers(cl, uid)
+                
+                await m.edit(f"✅ **লগইন সফল এবং ইনস্ট্যান্ট একটিভ হয়েছে (2FA)!**\n\nঅ্যাকাউন্ট: **{me.first_name}**\n\n_সেশন কোড:_ `{str_session}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            except Exception as ex:
+                await m.edit(f"❌ পাসওয়ার্ড ভুল: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+    # বায়ো এবং নাম পরিবর্তনের এক্সিস্টিং লজিক
+    for uid, data in SESSIONS.items():
+        waiting = data.get("_waiting")
+        if not waiting: continue
+        try:
+            if waiting == "bio":
+                await data["client"](UpdateProfileRequest(about=e.text.strip()))
+                await e.reply(f"Bio updated for **{data['me'].first_name}**.")
+            elif waiting == "name":
+                await data["client"](UpdateProfileRequest(first_name=e.text.strip()))
+                await e.reply(f"Name updated for **{data['me'].first_name}**.")
+        except Exception as ex: 
+            logger.error(f"Profile update error: {ex}")
+            await e.reply(f"Error: {ex}")
+        data.pop("_waiting", None); break
+
 # ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
     await start_dummy_server()
-    
     await bot.start(bot_token=BOT_TOKEN)
     logger.info("🟢 Manager bot online.")
 
+    # Render Env এবং local JSON ফাইল—উভয় সোর্স থেকে সেশন লোড করার মেকানিজম
+    all_session_strings = []
     if RAW_SESSIONS:
-        for s in [x.strip() for x in RAW_SESSIONS.split(",") if x.strip()]:
-            try:
-                cl = TelegramClient(StringSession(s), API_ID, API_HASH)
-                await cl.connect()
-                if await cl.is_user_authorized():
-                    me = await cl.get_me()
-                    uid = me.id
-                    SESSIONS[uid] = {
-                        "client":   cl,
-                        "me":       me,
-                        "afk":      True,
-                        "afk_msg":  "I'm away right now. I'll get back to you soon.",
-                        "afk_sent": {}
-                    }
-                    register_userbot_handlers(cl, uid)
-                    logger.info(f"✅ Active Session Loaded: {me.first_name} (ID: {uid})")
-            except Exception as ex: 
-                logger.error(f"❌ Session Authorization Error: {ex}")
+        all_session_strings.extend([x.strip() for x in RAW_SESSIONS.split(",") if x.strip()])
+    if "saved_sessions" in db:
+        all_session_strings.extend(db["saved_sessions"])
+        
+    all_session_strings = list(set(all_session_strings)) # ডুপ্লিকেট বাদ দেওয়া হলো
+
+    for s in all_session_strings:
+        try:
+            cl = TelegramClient(StringSession(s), API_ID, API_HASH)
+            await cl.connect()
+            if await cl.is_user_authorized():
+                me = await cl.get_me()
+                uid = me.id
+                SESSIONS[uid] = {
+                    "client":   cl,
+                    "me":       me,
+                    "afk":      True,
+                    "afk_msg":  "I'm away right now. I'll get back to you soon.",
+                    "afk_sent": {}
+                }
+                register_userbot_handlers(cl, uid)
+                logger.info(f"✅ Active Session Loaded: {me.first_name} (ID: {uid})")
+        except Exception as ex: 
+            logger.error(f"❌ Session Authorization Error: {ex}")
 
     await bot.run_until_disconnected()
 
