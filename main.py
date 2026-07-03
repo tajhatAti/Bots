@@ -9,10 +9,10 @@ import urllib.request
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
+from telethon.errors import SessionPasswordNeededError
 from deep_translator import GoogleTranslator
 
 # ── BETTER LOGGING SYSTEM ─────────────────────────────────────────────────────
-# এটি তোমার Render লগকে আরও রিডেবল এবং ডিবাগিংয়ের উপযোগী করবে
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -31,10 +31,11 @@ BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 OWNER_ID     = int(os.environ.get("OWNER_ID", 0))
 RAW_SESSIONS = os.environ.get("STRING_SESSIONS", "")
 DB_FILE      = "manager_data.json"
-PORT         = int(os.environ.get("PORT", 8080)) # Render এই পোর্টটি খোঁজে
+PORT         = int(os.environ.get("PORT", 8080))
 
 start_time   = time.time()
 SESSIONS     = {}   
+LOGIN_STATES = {}  # সেশন তৈরির স্টেট ট্র্যাকিং করার জন্য
 AFK_COOLDOWN = 3600  
 
 def load_db():
@@ -57,7 +58,6 @@ def uptime():
 bot = TelegramClient('manager_bot', API_ID, API_HASH)
 
 # ── RENDER PORT BINDING FIX (DUMMY HTTP SERVER) ────────────────────────────────
-# এই ফাংশনটি Render-এর পোর্ট স্ক্যানারকে ধোঁকা দেবে এবং Timed Out হওয়া আটকাবে
 async def handle_render_ping(reader, writer):
     await reader.read(100)
     response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
@@ -79,6 +79,9 @@ def main_menu_buttons():
         name = data["me"].first_name
         afk_icon = "💤" if data["afk"] else "🟢"
         buttons.append([Button.inline(f"{afk_icon} {name}", data=f"acc_{uid}")])
+    
+    # নতুন অ্যাকাউন্ট অ্যাড করার বাটন
+    buttons.append([Button.inline("➕ Add New Account", data="add_acc")])
     buttons.append([Button.inline("📊 Stats", data="stats"), Button.inline("🔄 Refresh", data="refresh")])
     return buttons
 
@@ -112,9 +115,8 @@ def autodel_menu_buttons(uid):
 @bot.on(events.NewMessage(pattern='/start'))
 async def _(e):
     if e.sender_id != OWNER_ID: return
-    if not SESSIONS:
-        return await e.reply("No sessions loaded. Add `STRING_SESSIONS` to environment.")
-    await e.reply("**Session Manager**\n\nSelect an account to manage:", buttons=main_menu_buttons())
+    LOGIN_STATES.pop(OWNER_ID, None)
+    await e.reply("**Session Manager**\n\nSelect an account to manage or add a new one:", buttons=main_menu_buttons())
 
 @bot.on(events.CallbackQuery)
 async def _(e):
@@ -122,9 +124,13 @@ async def _(e):
     data = e.data.decode()
 
     if data == "main":
+        LOGIN_STATES.pop(OWNER_ID, None)
         await e.edit("**Session Manager**\n\nSelect an account to manage:", buttons=main_menu_buttons())
     elif data == "refresh":
         await e.edit("**Session Manager** _(refreshed)_\n\nSelect an account:", buttons=main_menu_buttons())
+    elif data == "add_acc":
+        LOGIN_STATES[OWNER_ID] = {"step": "phone"}
+        await e.edit("📱 তোমার টেলিগ্রাম নাম্বারটি আন্তর্জাতিক ফরম্যাটে দাও (যেমন: `+88017XXXXXXXX`):", buttons=[[Button.inline("◀️ Cancel", data="main")]])
     elif data == "stats":
         total  = len(SESSIONS)
         online = sum(1 for d in SESSIONS.values() if not d["afk"])
@@ -185,8 +191,69 @@ async def _(e):
         SESSIONS[int(data[9:])]["_waiting"] = "name"
         await e.edit("Send the new first name as a message now:", buttons=[[Button.inline("◀️ Cancel", data=f"acc_{int(data[9:])}")]])
 
+# ── LOGIN AND PROFILE HANDLER ─────────────────────────────────────────────────
 @bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.text and not e.text.startswith('/')))
-async def _(e):
+async def handle_owner_input(e):
+    state = LOGIN_STATES.get(OWNER_ID)
+    
+    # সেশন ক্রিয়েশন উইজার্ড লজিক
+    if state:
+        step = state.get("step")
+        if step == "phone":
+            phone = e.text.strip().replace(" ", "")
+            m = await e.reply("`OTP কোড পাঠানো হচ্ছে...`")
+            try:
+                cl = TelegramClient(StringSession(), API_ID, API_HASH)
+                await cl.connect()
+                res = await cl.send_code_request(phone)
+                LOGIN_STATES[OWNER_ID] = {
+                    "step": "otp",
+                    "phone": phone,
+                    "phone_code_hash": res.phone_code_hash,
+                    "client": cl
+                }
+                await m.edit("📩 তোমার টেলিগ্রাম অ্যাপে বা সিমে পাঠানো ওটিপি (OTP) কোডটি দাও।\n\nযদি কোডের মাঝে স্পেস থাকে, তবে স্পেস যেভাবে আছে সেভাবেই লিখে দাও (যেমন: `1 2 3 4 5`):")
+            except Exception as ex:
+                await m.edit(f"❌ এরর এসেছে: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+        elif step == "otp":
+            otp = e.text.strip().replace(" ", "")
+            cl = state["client"]
+            phone = state["phone"]
+            hsh = state["phone_code_hash"]
+            m = await e.reply("`OTP ভেরিফাই করা হচ্ছে...`")
+            try:
+                await cl.sign_in(phone, otp, phone_code_hash=hsh)
+                str_session = cl.session.save()
+                await m.edit(f"✅ **লগইন সফল হয়েছে!**\n\nনিচের সেশন কোডটি সম্পূর্ণ কপি করে তোমার Render-এর `STRING_SESSIONS` এনভায়রনমেন্ট ভেরিয়েবলে যোগ করো (একাধিক সেশন হলে কমা `,` দিয়ে আলাদা করবে):\n\n`{str_session}`\n\n_রেন্ডার ড্যাশবোর্ডে ভেরিয়েবল সেভ করার পর অবশ্যই একবার Manual Deploy/Redeploy দিবে।_")
+                LOGIN_STATES.pop(OWNER_ID, None)
+                await cl.disconnect()
+            except SessionPasswordNeededError:
+                LOGIN_STATES[OWNER_ID]["step"] = "2fa"
+                await m.edit("🔒 তোমার অ্যাকাউন্টে Two-Step Verification অন আছে। দয়া করে 2FA পাসওয়ার্ডটি লিখে পাঠাও:")
+            except Exception as ex:
+                await m.edit(f"❌ লগইন ব্যর্থ হয়েছে: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+        elif step == "2fa":
+            pwd = e.text.strip()
+            cl = state["client"]
+            m = await e.reply("`2FA পাসওয়ার্ড ভেরিফাই করা হচ্ছে...`")
+            try:
+                await cl.sign_in(password=pwd)
+                str_session = cl.session.save()
+                await m.edit(f"✅ **লগইন সফল হয়েছে (2FA)!**\n\nনিচের সেশন কোডটি কপি করে তোমার Render-এর `STRING_SESSIONS` এ যোগ করো:\n\n`{str_session}`\n\n_রেন্ডারে সেভ করার পর রিডিপ্লয় দাও।_")
+                LOGIN_STATES.pop(OWNER_ID, None)
+                await cl.disconnect()
+            except Exception as ex:
+                await m.edit(f"❌ পাসওয়ার্ড ভুল বা অন্য সমস্যা: `{ex}`")
+                LOGIN_STATES.pop(OWNER_ID, None)
+            return
+
+    # বায়ো এবং নাম পরিবর্তনের এক্সিস্টিং লজিক
     for uid, data in SESSIONS.items():
         waiting = data.get("_waiting")
         if not waiting: continue
@@ -424,7 +491,6 @@ def register_userbot_handlers(client, uid):
 
 # ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
-    # প্রথমে ব্যাকগ্রাউন্ডে ডামি সার্ভার চালু করা হচ্ছে যেন Render পোর্ট ট্র্যাকিং ডিটেক্ট করতে পারে
     await start_dummy_server()
     
     await bot.start(bot_token=BOT_TOKEN)
