@@ -10,6 +10,11 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from deep_translator import GoogleTranslator
 
+# ── PYTHON 3.14 ASYNCIO LOOP FIX ──────────────────────────────────────────────
+# নতুন পাইথন ভার্সনে গ্লোবালি লুপ সেট না করলে টেলিথোন ক্র্যাশ করে
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 API_ID       = int(os.environ.get("API_ID", 0))
 API_HASH     = os.environ.get("API_HASH", "")
@@ -39,6 +44,7 @@ def uptime():
     h, s = divmod(s, 3600); m, s = divmod(s, 60)
     return f"{h}h {m}m {s}s"
 
+# এখন এই ক্লায়েন্টটি উপরের তৈরি করা লুপটি ব্যবহার করবে
 bot = TelegramClient('manager_bot', API_ID, API_HASH)
 
 # ── BOT INLINE MENUS ──────────────────────────────────────────────────────────
@@ -167,10 +173,9 @@ async def _(e):
         except Exception as ex: await e.reply(f"Error: {ex}")
         data.pop("_waiting", None); break
 
-# ── USERBOTS HANDLER ENGINE (PUBLIC + PRIVATE SUPPORT) ───────────────────────
+# ── USERBOTS HANDLER ENGINE ───────────────────────────────────────────────────
 def register_userbot_handlers(client, uid):
     
-    # Helper to check permissions
     def is_owner(e):
         return e.sender_id == OWNER_ID or e.sender_id == uid
 
@@ -400,4 +405,6 @@ async def main():
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # asyncio.run(main()) এর বদলে এখানে সেট করা গ্লোবাল লুপ দিয়ে রান করা হচ্ছে
+    loop.run_until_complete(main())
+    
