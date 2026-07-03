@@ -3,6 +3,7 @@ import asyncio
 import time
 import json
 import re
+import logging
 import urllib.parse
 import urllib.request
 from telethon import TelegramClient, events, Button
@@ -10,8 +11,16 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from deep_translator import GoogleTranslator
 
+# ── BETTER LOGGING SYSTEM ─────────────────────────────────────────────────────
+# এটি তোমার Render লগকে আরও রিডেবল এবং ডিবাগিংয়ের উপযোগী করবে
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
 # ── PYTHON 3.14 ASYNCIO LOOP FIX ──────────────────────────────────────────────
-# নতুন পাইথন ভার্সনে গ্লোবালি লুপ সেট না করলে টেলিথোন ক্র্যাশ করে
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -22,10 +31,11 @@ BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 OWNER_ID     = int(os.environ.get("OWNER_ID", 0))
 RAW_SESSIONS = os.environ.get("STRING_SESSIONS", "")
 DB_FILE      = "manager_data.json"
+PORT         = int(os.environ.get("PORT", 8080)) # Render এই পোর্টটি খোঁজে
 
 start_time   = time.time()
-SESSIONS     = {}   # uid -> {client, me, afk, afk_msg, afk_sent}
-AFK_COOLDOWN = 3600  # 1 hour
+SESSIONS     = {}   
+AFK_COOLDOWN = 3600  
 
 def load_db():
     if os.path.exists(DB_FILE):
@@ -44,8 +54,23 @@ def uptime():
     h, s = divmod(s, 3600); m, s = divmod(s, 60)
     return f"{h}h {m}m {s}s"
 
-# এখন এই ক্লায়েন্টটি উপরের তৈরি করা লুপটি ব্যবহার করবে
 bot = TelegramClient('manager_bot', API_ID, API_HASH)
+
+# ── RENDER PORT BINDING FIX (DUMMY HTTP SERVER) ────────────────────────────────
+# এই ফাংশনটি Render-এর পোর্ট স্ক্যানারকে ধোঁকা দেবে এবং Timed Out হওয়া আটকাবে
+async def handle_render_ping(reader, writer):
+    await reader.read(100)
+    response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+    writer.write(response.encode())
+    await writer.drain()
+    writer.close()
+
+async def start_dummy_server():
+    try:
+        server = await asyncio.start_server(handle_render_ping, '0.0.0.0', PORT)
+        logger.info(f"🟢 Dummy Web Server started successfully on port {PORT}")
+    except Exception as e:
+        logger.error(f"🔴 Failed to start dummy server: {e}")
 
 # ── BOT INLINE MENUS ──────────────────────────────────────────────────────────
 def main_menu_buttons():
@@ -126,7 +151,9 @@ async def _(e):
                 await SESSIONS[uid]["client"].delete_profile_photos(p[0])
                 await e.answer("Profile photo removed.")
             else: await e.answer("No photo to remove.", alert=True)
-        except Exception as ex: await e.answer(f"Error: {ex}", alert=True)
+        except Exception as ex: 
+            logger.error(f"Error removing photo: {ex}")
+            await e.answer(f"Error: {ex}", alert=True)
     elif data.startswith("myinfo_"):
         uid = int(data[7:])
         if uid not in SESSIONS: return await e.answer("Session not found.", alert=True)
@@ -170,7 +197,9 @@ async def _(e):
             elif waiting == "name":
                 await data["client"](UpdateProfileRequest(first_name=e.text.strip()))
                 await e.reply(f"Name updated for **{data['me'].first_name}**.")
-        except Exception as ex: await e.reply(f"Error: {ex}")
+        except Exception as ex: 
+            logger.error(f"Profile update error: {ex}")
+            await e.reply(f"Error: {ex}")
         data.pop("_waiting", None); break
 
 # ── USERBOTS HANDLER ENGINE ───────────────────────────────────────────────────
@@ -270,7 +299,9 @@ def register_userbot_handlers(client, uid):
             await m.delete()
             sent = await client.send_file(e.chat_id, path, caption=f"`{txt}`", reply_to=e.id)
             asyncio.create_task(auto_del(sent))
-        except Exception as ex: await m.edit(f"Error: {ex}")
+        except Exception as ex: 
+            logger.error(f"QR Error: {ex}")
+            await m.edit(f"Error: {ex}")
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?tts (.+)'))
     async def _(e):
@@ -284,7 +315,9 @@ def register_userbot_handlers(client, uid):
             await m.delete()
             sent = await client.send_file(e.chat_id, "/tmp/tts.mp3", voice_note=True, reply_to=e.id)
             asyncio.create_task(auto_del(sent))
-        except Exception as ex: await m.edit(f"Error: {ex}")
+        except Exception as ex: 
+            logger.error(f"TTS Error: {ex}")
+            await m.edit(f"Error: {ex}")
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?tr (\S+)$'))
     async def _(e):
@@ -300,7 +333,9 @@ def register_userbot_handlers(client, uid):
             res = GoogleTranslator(source='auto', target=lang).translate(txt)
             m = await respond(e, f"**Translation ({lang}):**\n{res}")
             asyncio.create_task(auto_del(m))
-        except Exception as ex: m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
+        except Exception as ex: 
+            logger.error(f"Translation Error: {ex}")
+            m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?stickify$'))
     async def _(e):
@@ -321,7 +356,9 @@ def register_userbot_handlers(client, uid):
             await m.delete()
             sent = await client.send_file(e.chat_id, out, reply_to=e.id)
             asyncio.create_task(auto_del(sent))
-        except Exception as ex: await m.edit(f"Error: {ex}")
+        except Exception as ex: 
+            logger.error(f"Stickify Error: {ex}")
+            await m.edit(f"Error: {ex}")
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?weather (.+)'))
     async def _(e):
@@ -334,7 +371,9 @@ def register_userbot_handlers(client, uid):
                 data = res.read().decode()
             m = await respond(e, f"🌤 {data}")
             asyncio.create_task(auto_del(m))
-        except Exception as ex: m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
+        except Exception as ex: 
+            logger.error(f"Weather Error: {ex}")
+            m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?wiki (.+)'))
     async def _(e):
@@ -347,7 +386,9 @@ def register_userbot_handlers(client, uid):
                 data = json.loads(res.read())
             m = await respond(e, f"**{data.get('title','')}**\n\n{data.get('extract','No result.')[:500]}")
             asyncio.create_task(auto_del(m))
-        except Exception as ex: m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
+        except Exception as ex: 
+            logger.error(f"Wiki Error: {ex}")
+            m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?urban (.+)'))
     async def _(e):
@@ -364,7 +405,9 @@ def register_userbot_handlers(client, uid):
             defn = items[0]["definition"][:400].replace("[","").replace("]","")
             m = await respond(e, f"**{query}**\n\n{defn}")
             asyncio.create_task(auto_del(m))
-        except Exception as ex: m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
+        except Exception as ex: 
+            logger.error(f"Urban Error: {ex}")
+            m = await e.reply(f"Error: {ex}"); asyncio.create_task(auto_del(m, 10))
 
     @client.on(events.NewMessage(pattern=r'(?i)^[.!]?calc (.+)'))
     async def _(e):
@@ -376,12 +419,16 @@ def register_userbot_handlers(client, uid):
             result = eval(expr, {'__builtins__': {}})
             m = await respond(e, f"`{expr} = {result}`")
             asyncio.create_task(auto_del(m))
-        except: m = await e.reply("Invalid expression."); asyncio.create_task(auto_del(m, 10))
+        except: 
+            m = await e.reply("Invalid expression."); asyncio.create_task(auto_del(m, 10))
 
 # ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
+    # প্রথমে ব্যাকগ্রাউন্ডে ডামি সার্ভার চালু করা হচ্ছে যেন Render পোর্ট ট্র্যাকিং ডিটেক্ট করতে পারে
+    await start_dummy_server()
+    
     await bot.start(bot_token=BOT_TOKEN)
-    print("[+] Manager bot online.")
+    logger.info("🟢 Manager bot online.")
 
     if RAW_SESSIONS:
         for s in [x.strip() for x in RAW_SESSIONS.split(",") if x.strip()]:
@@ -399,12 +446,11 @@ async def main():
                         "afk_sent": {}
                     }
                     register_userbot_handlers(cl, uid)
-                    print(f"[+] Active Session: {me.first_name}")
-            except Exception as ex: print(f"[-] Session Error: {ex}")
+                    logger.info(f"✅ Active Session Loaded: {me.first_name} (ID: {uid})")
+            except Exception as ex: 
+                logger.error(f"❌ Session Authorization Error: {ex}")
 
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
-    # asyncio.run(main()) এর বদলে এখানে সেট করা গ্লোবাল লুপ দিয়ে রান করা হচ্ছে
     loop.run_until_complete(main())
-    
